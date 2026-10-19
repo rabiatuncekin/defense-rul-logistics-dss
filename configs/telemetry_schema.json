@@ -1,0 +1,90 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "TacticalTelemetryMessage",
+    "type": "object",
+    "properties": {
+        "unit_id": {
+            "type": "string"
+        },
+        "timestamp": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "operational_status": {
+            "type": "string"
+        },
+        "telemetry": {
+            "type": "object",
+            "properties": {
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
+                "altitude_m": {
+                    "type": "number"
+                },
+                "speed_kmh": {
+                    "type": "number"
+                },
+                "fuel_level_pct": {
+                    "type": "number"
+                }
+            },
+            "required": [
+                "latitude",
+                "longitude",
+                "altitude_m",
+                "speed_kmh",
+                "fuel_level_pct"
+            ]
+        },
+        "c_mapss_sensors": {
+            "type": "object",
+            "properties": {
+                "s2": {
+                    "type": "number"
+                },
+                "s3": {
+                    "type": "number"
+                },
+                "s4": {
+                    "type": "number"
+                },
+                "s7": {
+                    "type": "number"
+                },
+                "s8": {
+                    "type": "number"
+                },
+                "s11": {
+                    "type": "number"
+                },
+                "s12": {
+                    "type": "number"
+                },
+                "s15": {
+                    "type": "number"
+                }
+            },
+            "required": [
+                "s2",
+                "s3",
+                "s4",
+                "s7",
+                "s8",
+                "s11",
+                "s12",
+                "s15"
+            ]
+        }
+    },
+    "required": [
+        "unit_id",
+        "timestamp",
+        "operational_status",
+        "telemetry",
+        "c_mapss_sensors"
+    ]
+}
