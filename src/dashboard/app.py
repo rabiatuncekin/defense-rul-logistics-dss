@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -13,9 +14,13 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.models.predict_rul import COLUMNS, RAW_DATA_PATH
-from src.routing.rul_vrptw_router import TacticalRULRouter
+from src.routing.rul_vrptw_router import TacticalRULRouter, haversine_km
 
 DB_PATH = os.path.join("data", "processed", "tactical_dss.db")
+IP5_PATH = os.path.join("data", "processed", "ip5_benchmark_results.json")
+IP7_PATH = os.path.join("data", "processed", "ip7_test_results.json")
+IP9_PATH = os.path.join("data", "processed", "ip9_inference_benchmark.json")
+IP10_PATH = os.path.join("data", "processed", "ip10_routing_benchmark.json")
 
 st.set_page_config(
     page_title="C4ISR | İHA Kestirimci Bakım & Lojistik Karar Destek",
@@ -27,7 +32,6 @@ st.set_page_config(
 # --- ÖZEL TAKTİK KOMUTA KONTROL (C4ISR) CSS TASARIMI ---
 st.markdown("""
 <style>
-    /* Ana arka plan ve tipografi */
     .stApp {
         background-color: #090d16;
         color: #e2e8f0;
@@ -36,7 +40,6 @@ st.markdown("""
         background-color: #0f172a;
         border-right: 1px solid rgba(56, 189, 248, 0.2);
     }
-    /* Üst Komuta Başlık Banner'ı */
     .c4isr-header {
         background: linear-gradient(90deg, #0f172a 0%, #1e293b 60%, #0f172a 100%);
         border: 1px solid rgba(56, 189, 248, 0.35);
@@ -71,7 +74,6 @@ st.markdown("""
         font-weight: 600;
         font-family: 'Consolas', monospace;
     }
-    /* Özel KPI Kartları */
     .kpi-card {
         background: #111827;
         border: 1px solid rgba(148, 163, 184, 0.18);
@@ -101,7 +103,6 @@ st.markdown("""
         color: #64748b;
         margin-top: 4px;
     }
-    /* Sekme (Tab) iyileştirmeleri */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         background-color: #0f172a;
@@ -126,6 +127,26 @@ st.markdown("""
 @st.cache_data
 def load_raw_telemetry():
     return pd.read_csv(RAW_DATA_PATH, sep=r"\s+", header=None, names=COLUMNS)
+
+
+def load_json_if_exists(path: str) -> dict | None:
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def load_live_stream_table() -> pd.DataFrame | None:
+    """İP9 PySpark Streaming hattının SQLite veritabanına yazdığı canlı tahminleri okur."""
+    if not os.path.exists(DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df_live = pd.read_sql_query("SELECT * FROM live_stream_predictions", conn)
+        conn.close()
+        return df_live if not df_live.empty else None
+    except Exception:
+        return None
 
 
 def sync_tactical_database(fleet_df: pd.DataFrame, decisions_df: pd.DataFrame, depots_df: pd.DataFrame):
@@ -188,7 +209,6 @@ def nl_to_sql_engine(question: str, crit_th: int) -> tuple[str, pd.DataFrame]:
 
 
 def build_tactical_map(graph, decisions_df: pd.DataFrame, crit_th: int, warn_th: int) -> folium.Map:
-    # API Key gerektirmeyen güvenilir OpenStreetMap + Esri Uydu katmanı
     m = folium.Map(location=[38.75, 27.65], zoom_start=7, tiles="OpenStreetMap", name="Taktik Harita")
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -198,7 +218,6 @@ def build_tactical_map(graph, decisions_df: pd.DataFrame, crit_th: int, warn_th:
         control=True
     ).add_to(m)
 
-    # 1. Bakım Üsleri
     for node_id, data in graph.nodes(data=True):
         if data.get("type") == "DEPOT":
             folium.Marker(
@@ -214,7 +233,6 @@ def build_tactical_map(graph, decisions_df: pd.DataFrame, crit_th: int, warn_th:
                 icon=folium.Icon(color="cadetblue", icon="wrench", prefix="fa")
             ).add_to(m)
 
-    # 2. İHA Konumları ve Bakım Rotaları
     decision_map = decisions_df.set_index("uav_id").to_dict(orient="index")
     for node_id, data in graph.nodes(data=True):
         if data.get("type") == "UAV":
@@ -260,41 +278,49 @@ def build_tactical_map(graph, decisions_df: pd.DataFrame, crit_th: int, warn_th:
 
 
 def main():
-    # --- SOL KOMUTA KONTROL KENAR ÇUBUĞU (SIDEBAR) ---
-    with st.sidebar:
-        st.markdown("### ⚙️ Taktik Parametreler")
-        st.caption("Kestirimci bakım eşiklerini ve sorti simülasyonunu anlık yönetin.")
+    live_df = load_live_stream_table()
 
+    # --- SOL KOMUTA KONTROL KENAR ÇUBUĞU ---
+    with st.sidebar:
+        st.markdown("### 📡 Telemetri Veri Kaynağı")
+        data_mode = st.radio(
+            "Besleme Modu:",
+            options=["Canlı PySpark Akışı (SQLite)", "İnteraktif Sorti Simülasyonu"],
+            index=0 if live_df is not None else 1,
+            help="İP9 PySpark Streaming hattının ürettiği canlı RUL çıktıları ile manuel sorti kaydırıcısı arasında geçiş yapın."
+        )
+
+        if data_mode == "Canlı PySpark Akışı (SQLite)":
+            if live_df is not None:
+                avg_inf = live_df["inference_ms"].mean()
+                st.success(f"Canlı akış bağlı ({len(live_df)} İHA • Çıkarım: {avg_inf:.1f} ms)")
+                if st.button("🔄 Canlı Veriyi Yenile", use_container_width=True):
+                    st.rerun()
+            else:
+                st.warning("Canlı akış tablosu henüz boş. Simülasyon moduna düşüldü.")
+
+        st.divider()
+        st.markdown("### ⚙️ Taktik Parametreler")
         cycle_offset = st.slider(
             "⏱️ Sorti İlerletme (+Çevrim)",
             min_value=0,
             max_value=40,
             value=0,
             step=5,
-            help="Filonun uçuş süresini ileri sararak LSTM modelinin yeni RUL tahminlerini ve rota değişimlerini gözlemleyin."
+            disabled=(data_mode == "Canlı PySpark Akışı (SQLite)" and live_df is not None),
         )
-
-        st.divider()
         crit_th = st.slider("🔴 Kritik RUL Eşiği (Acil Dönüş)", 15, 45, 30, step=5)
         warn_th = st.slider("🟠 Uyarı RUL Eşiği (Planlı Bakım)", 45, 90, 65, step=5)
 
-        st.divider()
-        st.markdown("**Mimari Katmanlar**")
-        st.markdown(
-            "- **Veri:** NASA C-MAPSS FD001\n"
-            "- **Akış:** Kafka + PySpark\n"
-            "- **Model:** 2-Katmanlı LSTM (`RMSE: 13.27`)\n"
-            "- **Optimizasyon:** NetworkX RUL-VRPTW"
-        )
-
     # --- ÜST KOMUTA BANNER ---
-    st.markdown("""
+    source_label = "CANLI PYSPARK STREAMING" if (data_mode == "Canlı PySpark Akışı (SQLite)" and live_df is not None) else f"SİMÜLASYON (+{cycle_offset} ÇEVRİM)"
+    st.markdown(f"""
     <div class="c4isr-header">
         <div>
             <p class="c4isr-title">🛡️ SAVUNMA LOJİSTİĞİ: KESTİRİMCİ BAKIM & DİNAMİK ROTALAMA KOKPİTİ</p>
             <div class="c4isr-subtitle">C-MAPSS TELEMETRİ • PYTORCH LSTM RUL • NETWORKX RUL-VRPTW • TEXT-TO-SQL</div>
         </div>
-        <div class="live-badge">● SİSTEM AKTİF</div>
+        <div class="live-badge">● {source_label}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -303,20 +329,45 @@ def main():
     router = TacticalRULRouter()
     fleet_states = router.register_fleet_telemetry(df_raw)
 
-    # Kenar çubuğundan sorti ilerletildiyse RUL ve eşikleri dinamik güncelle
+    if data_mode == "Canlı PySpark Akışı (SQLite)" and live_df is not None:
+        live_map = live_df.set_index("uav_id").to_dict(orient="index")
+        for uav in fleet_states:
+            uid = uav["uav_id"]
+            if uid in live_map:
+                rec = live_map[uid]
+                uav["current_cycle"] = int(rec["cycle"])
+                uav["lat"] = float(rec["lat"])
+                uav["lon"] = float(rec["lon"])
+                uav["predicted_rul"] = float(rec["predicted_rul"])
+
+                router.graph.nodes[uid]["current_cycle"] = uav["current_cycle"]
+                router.graph.nodes[uid]["lat"] = uav["lat"]
+                router.graph.nodes[uid]["lon"] = uav["lon"]
+                router.graph.nodes[uid]["predicted_rul"] = uav["predicted_rul"]
+
+                # Canlı GPS konumuna göre üs mesafelerini güncelle
+                for depot_id in router.graph.successors(uid):
+                    d_node = router.graph.nodes[depot_id]
+                    dist_km = haversine_km(uav["lat"], uav["lon"], d_node["lat"], d_node["lon"])
+                    flight_min = (dist_km / uav["cruise_kmh"]) * 60.0
+                    router.graph.edges[uid, depot_id]["distance_km"] = round(dist_km, 2)
+                    router.graph.edges[uid, depot_id]["flight_time_min"] = round(flight_min, 1)
+                    router.graph.edges[uid, depot_id]["required_cycles"] = round(flight_min / 15.0, 2)
+    else:
+        for uav in fleet_states:
+            unit_all = df_raw[df_raw["unit_id"] == uav["unit_id"]].sort_values("cycle")
+            max_avail_cycle = int(unit_all["cycle"].max())
+            new_cycle = min(max_avail_cycle, uav["current_cycle"] + cycle_offset)
+
+            if cycle_offset > 0:
+                window_df = unit_all[unit_all["cycle"] <= new_cycle]
+                pred = router.predictor.predict_from_window(window_df)
+                uav["current_cycle"] = new_cycle
+                uav["predicted_rul"] = pred["predicted_rul"]
+                router.graph.nodes[uav["uav_id"]]["current_cycle"] = new_cycle
+                router.graph.nodes[uav["uav_id"]]["predicted_rul"] = pred["predicted_rul"]
+
     for uav in fleet_states:
-        unit_all = df_raw[df_raw["unit_id"] == uav["unit_id"]].sort_values("cycle")
-        max_avail_cycle = int(unit_all["cycle"].max())
-        new_cycle = min(max_avail_cycle, uav["current_cycle"] + cycle_offset)
-
-        if cycle_offset > 0:
-            window_df = unit_all[unit_all["cycle"] <= new_cycle]
-            pred = router.predictor.predict_from_window(window_df)
-            uav["current_cycle"] = new_cycle
-            uav["predicted_rul"] = pred["predicted_rul"]
-            router.graph.nodes[uav["uav_id"]]["current_cycle"] = new_cycle
-            router.graph.nodes[uav["uav_id"]]["predicted_rul"] = pred["predicted_rul"]
-
         rul = uav["predicted_rul"]
         if rul <= crit_th:
             uav["status"] = "KRİTİK"
@@ -353,7 +404,7 @@ def main():
         <div class="kpi-card cyan">
             <div class="kpi-label">Aktif Taktik Filo</div>
             <div class="kpi-value">{len(fleet_df)} İHA</div>
-            <div class="kpi-delta">Simülasyon Ofseti: +{cycle_offset} Çevrim</div>
+            <div class="kpi-delta">{source_label}</div>
         </div>""", unsafe_allow_html=True)
     with c2:
         st.markdown(f"""
@@ -379,11 +430,12 @@ def main():
 
     st.write("")
 
-    # --- 3 SEKMELİ KOMUTA KONTROL DÜZENİ ---
-    tab1, tab2, tab3 = st.tabs([
+    # --- 4 SEKMELİ KOMUTA KONTROL DÜZENİ ---
+    tab1, tab2, tab3, tab4 = st.tabs([
         "🗺️ Taktik Harita & Bakım Rotalama",
         "📈 Çoklu Sensör Degradasyon Analitiği",
-        "💬 Komuta Kontrol Text-to-SQL"
+        "💬 Komuta Kontrol Text-to-SQL",
+        "📊 RUL-VRPTW & Sistem Doğrulama Metrikleri"
     ])
 
     with tab1:
@@ -499,6 +551,70 @@ def main():
             with st.expander("Üretilen SQL Sorgusu", expanded=True):
                 st.code(generated_sql, language="sql")
             st.dataframe(sql_result, use_container_width=True, hide_index=True)
+
+    with tab4:
+        st.markdown("#### Uçtan Uca Deneysel Doğrulama ve RUL-VRPTW Karşılaştırması")
+        ip5 = load_json_if_exists(IP5_PATH)
+        ip7 = load_json_if_exists(IP7_PATH)
+        ip9 = load_json_if_exists(IP9_PATH)
+        ip10 = load_json_if_exists(IP10_PATH)
+
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric(
+            "İP5 Akış Hızı & Gecikme",
+            f"{ip5['e2e_throughput_msg_per_sec']} msg/s" if ip5 else "-",
+            f"Ort. Gecikme: {ip5['avg_e2e_latency_ms']} ms" if ip5 else ""
+        )
+        b2.metric(
+            "İP7 Kör Test RMSE (test_FD001)",
+            f"{ip7['test_rmse']} çevrim" if ip7 else "-",
+            f"Kritik F1: %{ip7['critical_threshold_30']['f1_score']*100:.2f}" if ip7 else ""
+        )
+        b3.metric(
+            "İP9 Spark LSTM Çıkarımı",
+            f"{ip9['avg_lstm_inference_ms']} ms" if ip9 else "-",
+            "Hedef < 500 ms"
+        )
+        b4.metric(
+            "İP10 RUL-VRPTW Çözüm Süresi",
+            f"{ip10['solver_latency_avg_ms']} ms" if ip10 else "-",
+            f"Risk Azalımı: %{ip10['efficiency_gains_pct']['risk_reduction_vs_conventional']}" if ip10 else ""
+        )
+
+        if ip10:
+            comp = ip10["comparisons"]
+            methods = [
+                comp["conventional_reactive"]["method"],
+                comp["classic_nearest_depot"]["method"],
+                comp["proposed_rul_vrptw"]["method"],
+            ]
+            recovery_rates = [
+                comp["conventional_reactive"]["safe_recovery_rate_pct"],
+                comp["classic_nearest_depot"]["safe_recovery_rate_pct"],
+                comp["proposed_rul_vrptw"]["safe_recovery_rate_pct"],
+            ]
+            risk_scores = [
+                comp["conventional_reactive"]["cumulative_risk_score"],
+                comp["classic_nearest_depot"]["cumulative_risk_score"],
+                comp["proposed_rul_vrptw"]["cumulative_risk_score"],
+            ]
+
+            comp_fig = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=("Güvenli Kurtarma Oranı (%)", "Kümülatif Operasyonel Risk Skoru (Düşük = İyi)")
+            )
+            colors = ["#64748b", "#f59e0b", "#10b981"]
+            comp_fig.add_trace(go.Bar(x=methods, y=recovery_rates, marker_color=colors, text=recovery_rates, textposition="auto"), row=1, col=1)
+            comp_fig.add_trace(go.Bar(x=methods, y=risk_scores, marker_color=colors, text=risk_scores, textposition="auto"), row=1, col=2)
+            comp_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#111827",
+                plot_bgcolor="#0f172a",
+                height=380,
+                showlegend=False,
+                margin=dict(l=20, r=20, t=45, b=20)
+            )
+            st.plotly_chart(comp_fig, use_container_width=True)
 
 
 if __name__ == "__main__":
