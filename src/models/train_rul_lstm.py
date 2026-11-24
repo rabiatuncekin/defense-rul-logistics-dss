@@ -72,6 +72,7 @@ def train_model():
     print(f"Eğitim donanımı: {device}")
 
     df = pd.read_parquet(PROCESSED_DATA_PATH)
+    df["RUL"] = df["RUL"].clip(upper=125)  # NASA C-MAPSS Piecewise Linear RUL standardı
     print(f"İşlenmiş veri yüklendi: {df.shape[0]} kayıt.")
 
     X, y = create_sliding_windows(df, seq_len=SEQUENCE_LENGTH)
