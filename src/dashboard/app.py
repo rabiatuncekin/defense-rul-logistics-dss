@@ -8,6 +8,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_folium import st_folium
+from src.models.predict_rul import COLUMNS, RAW_DATA_PATH
+from src.routing.rul_vrptw_router import TacticalRULRouter, haversine_km
+from src.nlp.text_to_sql import TacticalTextToSQLEngine
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT_DIR not in sys.path:
@@ -547,10 +550,19 @@ def main():
             user_query = st.text_input("Veya Özel Sorgu Yazın:", value=selected_prompt)
 
         if st.button("⚡ Sorguyu Yürüt", type="primary"):
-            generated_sql, sql_result = nl_to_sql_engine(user_query, crit_th)
-            with st.expander("Üretilen SQL Sorgusu", expanded=True):
-                st.code(generated_sql, language="sql")
-            st.dataframe(sql_result, use_container_width=True, hide_index=True)
+         sql_engine = TacticalTextToSQLEngine(DB_PATH)
+         query_out = sql_engine.ask(user_query)
+         with st.expander("Üretilen SQL Sorgusu", expanded=True):
+             st.code(query_out["sql"], language="sql")
+         if not query_out["valid"]:
+             st.error(f"🛡️ {query_out['validation_message']}")
+         else:
+             st.caption(
+                 f"Motor: {query_out['engine']} • "
+                 f"Doğrulama: {query_out['validation_message']} • "
+                 f"Süre: {query_out['latency_ms']} ms"
+             )
+             st.dataframe(query_out["dataframe"], width="stretch", hide_index=True)
 
     with tab4:
         st.markdown("#### Uçtan Uca Deneysel Doğrulama ve RUL-VRPTW Karşılaştırması")
